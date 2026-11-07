@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZTM – TV'ye liste gönder</title>
+<style>
+  :root { --accent:#6CC8FF; --accent-dark:#1F6FD6; --bg:#07112B; --surface:#0E1D45; --surface-2:#16295C; --muted:#B8CBEA; --ok:#7DE3A4; --err:#FF8A9A; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(ellipse at 80% 0%, #12245A 0%, var(--bg) 60%); color:#fff;
+         font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; font-size:17px; }
+  main { max-width:520px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { margin:0 0 4px; font-size:34px; letter-spacing:3px; color:var(--accent); }
+  .lead { color:var(--muted); margin:0 0 26px; }
+  label { display:block; color:var(--muted); font-size:14px; margin:16px 0 6px; }
+  input { width:100%; padding:14px 16px; border-radius:12px; border:1px solid var(--surface-2); background:var(--bg);
+          color:#fff; font-size:17px; outline:none; }
+  input:focus { border-color:var(--accent); }
+  #code { text-transform:uppercase; letter-spacing:4px; font-size:24px; text-align:center; font-weight:700; }
+  .card { background:var(--surface); border-radius:18px; padding:18px; margin-top:18px; }
+  .tabs { display:flex; background:var(--bg); border-radius:12px; padding:4px; }
+  .tabs button { flex:1; border:0; background:none; color:var(--muted); padding:11px 6px; border-radius:9px; font-size:15px; cursor:pointer; }
+  .tabs button.on { background:var(--accent-dark); color:#fff; }
+  .pane { display:none; } .pane.on { display:block; }
+  .send { width:100%; margin-top:22px; padding:16px; border:0; border-radius:14px; background:var(--accent-dark); color:#fff;
+          font-size:18px; font-weight:600; cursor:pointer; }
+  .send:disabled { opacity:.5; }
+  #msg { margin-top:18px; padding:14px 16px; border-radius:12px; display:none; line-height:1.45; }
+  #msg.wait { display:block; background:var(--surface-2); }
+  #msg.ok { display:block; background:rgba(125,227,164,.15); color:var(--ok); }
+  #msg.err { display:block; background:rgba(255,138,154,.15); color:var(--err); }
+  .hint { color:var(--muted); font-size:13px; margin-top:8px; line-height:1.45; }
+  input[type=file] { padding:12px; }
+  footer { color:var(--muted); font-size:12px; margin-top:30px; line-height:1.5; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ZTM</h1>
+  <p class="lead">Televizyondaki ZTM uygulamasına liste gönder.</p>
+
+  <div class="card">
+    <label for="code">TV ekranındaki kod</label>
+    <input id="code" maxlength="9" autocomplete="off" placeholder="ABCD-1234">
+    <div class="hint">TV'de: Listeler → Telefondan gönder. QR kodu okuttuysan kod kendiliğinden yazılır.</div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <button data-p="m3u" class="on">M3U adresi</button>
+      <button data-p="xtream">Xtream</button>
+      <button data-p="file">Dosya</button>
+    </div>
+
+    <div class="pane on" id="p-m3u">
+      <label for="m3u-url">Liste adresi</label>
+      <input id="m3u-url" type="url" inputmode="url" placeholder="https://…/liste.m3u">
+      <label for="m3u-name">Liste adı (isteğe bağlı)</label>
+      <input id="m3u-name" placeholder="Örnek: Türk kanalları">
+    </div>
+
+    <div class="pane" id="p-xtream">
+      <label for="x-server">Sunucu adresi</label>
+      <input id="x-server" type="url" inputmode="url" placeholder="http://sunucu.com:8080">
+      <label for="x-user">Kullanıcı adı</label>
+      <input id="x-user" autocomplete="off" autocapitalize="off">
+      <label for="x-pass">Şifre</label>
+      <input id="x-pass" type="password" autocomplete="off">
+      <label for="x-name">Liste adı (isteğe bağlı)</label>
+      <input id="x-name" placeholder="Xtream">
+    </div>
+
+    <div class="pane" id="p-file">
+      <label for="f-file">M3U dosyası</label>
+      <input id="f-file" type="file" accept=".m3u,.m3u8,.txt,audio/x-mpegurl,application/x-mpegurl">
+      <label for="f-name">Liste adı (isteğe bağlı)</label>
+      <input id="f-name">
+      <div class="hint">En fazla 10 MB. Dosyayla gönderilen liste TV'de "Yenile" ile güncellenmez; değişince yeniden gönder.</div>
+    </div>
+
+    <button class="send" id="send">TV'ye gönder</button>
+    <div id="msg"></div>
+  </div>
+
+  <footer>Gönderim ntfy.sh aktarma servisi üzerinden, sadece bu koda gider. Kod TV'de ekran kapanınca geçersiz olur.</footer>
+</main>
+
+<script>
+(function () {
+  var NTFY = 'https://ntfy.sh/';
+  var $ = function (id) { return document.getElementById(id); };
+  var pane = 'm3u';
+
+  // Kod: 8 karakter, karışmayan harf/rakamlar. Ekranda ABCD-1234 biçiminde.
+  function cleanCode(v) { return (v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8); }
+  function fmt(c) { return c.length > 4 ? c.slice(0, 4) + '-' + c.slice(4) : c; }
+  function topic(c) { return 'ztmtv-' + c.toLowerCase(); }
+
+  var q = new URLSearchParams(location.search).get('k');
+  if (q) $('code').value = fmt(cleanCode(q));
+  $('code').addEventListener('input', function () {
+    var c = cleanCode(this.value); this.value = fmt(c);
+  });
+
+  var tabs = document.querySelectorAll('.tabs button');
+  for (var i = 0; i < tabs.length; i++) tabs[i].onclick = function () {
+    pane = this.getAttribute('data-p');
+    for (var j = 0; j < tabs.length; j++) tabs[j].className = tabs[j] === this ? 'on' : '';
+    var ps = document.querySelectorAll('.pane');
+    for (var k = 0; k < ps.length; k++) ps[k].className = 'pane' + (ps[k].id === 'p-' + pane ? ' on' : '');
+  };
+
+  function say(cls, text) { var m = $('msg'); m.className = cls; m.textContent = text; }
+
+  function publish(code, payload) {
+    return fetch(NTFY, {
+      method: 'POST',
+      body: JSON.stringify({ topic: topic(code), message: JSON.stringify(payload) })
+    }).then(function (r) { if (!r.ok) throw new Error('Gönderilemedi (' + r.status + ')'); return r.json(); });
+  }
+
+  // Dosyayı ayrı bir konuya ek olarak yükler, indirme adresini döndürür
+  function uploadFile(code, file) {
+    return fetch(NTFY + topic(code) + '-f', {
+      method: 'PUT', body: file, headers: { 'Filename': 'liste.m3u' }
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.status === 413 ? 'Dosya çok büyük' : 'Dosya yüklenemedi (' + r.status + ')');
+      return r.json();
+    }).then(function (j) {
+      if (!j.attachment || !j.attachment.url) throw new Error('Dosya yüklenemedi');
+      return j.attachment.url;
+    });
+  }
+
+  // TV'nin "eklendi" cevabını bekler (en çok 90 sn)
+  function waitAck(code, since, rid) {
+    var until = Date.now() + 90000;
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        fetch(NTFY + topic(code) + '-ok/json?poll=1&since=' + since).then(function (r) { return r.text(); }).then(function (t) {
+          var lines = t.split('\n');
+          for (var i = 0; i < lines.length; i++) {
+            if (!lines[i]) continue;
+            try {
+              var m = JSON.parse(lines[i]);
+              var a = m.event === 'message' ? JSON.parse(m.message) : null;
+              if (a && a.rid === rid) return resolve(a);   // sadece bu gönderimin cevabı
+            } catch (e) { }
+          }
+          if (Date.now() > until) return reject(new Error('TV cevap vermedi. Kodu ve TV\'de "Telefondan gönder" ekranının açık olduğunu kontrol et.'));
+          setTimeout(poll, 2500);
+        }).catch(function () { setTimeout(poll, 3000); });
+      })();
+    });
+  }
+
+  $('send').onclick = function () {
+    var code = cleanCode($('code').value);
+    if (code.length !== 8) return say('err', 'TV ekranındaki 8 karakterlik kodu yaz.');
+    var btn = this, since = Math.floor(Date.now() / 1000) - 2;
+    var rid = Math.random().toString(36).slice(2, 10);
+    var job;
+    if (pane === 'm3u') {
+      var url = $('m3u-url').value.trim();
+      if (!/^https?:\/\/.+/i.test(url)) return say('err', 'Adres http:// ya da https:// ile başlamalı.');
+      job = publish(code, { v: 1, rid: rid, t: 'm3u', url: url, name: $('m3u-name').value.trim() });
+    } else if (pane === 'xtream') {
+      var s = $('x-server').value.trim(), u = $('x-user').value.trim();
+      if (s.length < 4 || !u) return say('err', 'Sunucu adresi ve kullanıcı adı gerekli.');
+      job = publish(code, { v: 1, rid: rid, t: 'xtream', server: s, user: u, pass: $('x-pass').value, name: $('x-name').value.trim() });
+    } else {
+      var f = $('f-file').files[0];
+      if (!f) return say('err', 'Önce bir dosya seç.');
+      if (f.size > 10 * 1024 * 1024) return say('err', 'Dosya 10 MB\'tan büyük. Bunun yerine listenin adresini gönder.');
+      say('wait', 'Dosya yükleniyor…');
+      job = uploadFile(code, f).then(function (fileUrl) {
+        return publish(code, { v: 1, rid: rid, t: 'file', url: fileUrl, name: $('f-name').value.trim() || f.name.replace(/\.[^.]+$/, '') });
+      });
+    }
+    btn.disabled = true;
+    say('wait', 'Gönderiliyor… TV listeyi yüklerken bekle.');
+    job.then(function () { return waitAck(code, since, rid); }).then(function (a) {
+      if (a.ok) say('ok', '✓ TV\'ye eklendi: ' + (a.name || 'Liste') + ' · ' + a.count + ' kanal');
+      else say('err', 'TV listeyi açamadı: ' + (a.err || 'bilinmeyen hata'));
+    }).catch(function (e) { say('err', e.message); }).then(function () { btn.disabled = false; });
+  };
+})();
+</script>
+</body>
+</html>
