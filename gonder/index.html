@@ -83,7 +83,7 @@
       <input id="f-file" type="file" accept=".m3u,.m3u8,.txt,audio/x-mpegurl,application/x-mpegurl">
       <label for="f-name">Liste adı (isteğe bağlı)</label>
       <input id="f-name">
-      <div class="hint">En fazla 10 MB. Dosyayla gönderilen liste TV'de "Yenile" ile güncellenmez; değişince yeniden gönder.</div>
+      <div class="hint">Büyük dosyalar sıkıştırılıp parça parça gönderilir. Dosyayla gönderilen liste TV'de "Yenile" ile güncellenmez; değişince yeniden gönder.</div>
     </div>
 
     <div class="pane" id="p-backup">
@@ -99,6 +99,7 @@
   <footer>Gönderim ntfy.sh aktarma servisi üzerinden, sadece bu koda gider. Kod TV'de ekran kapanınca geçersiz olur.</footer>
 </main>
 
+<script src="fflate.js"></script>
 <script>
 (function () {
   var NTFY = 'https://ntfy.sh/';
@@ -115,20 +116,31 @@
 
   // TV'den yedek indirme bağlantısıyla gelindiyse indirme kartını göster
   var yedek = params.get('yedek');
-  if (yedek && /^https:\/\/ntfy\.sh\/file\//.test(yedek)) {
+  var yedekParts = yedek ? yedek.split(',') : [];
+  if (yedekParts.length && yedekParts.every(function (u) { return /^https:\/\/ntfy\.sh\/file\//.test(u); })) {
     $('dl-card').style.display = 'block';
     $('dl-btn').onclick = function () {
       $('dl-msg').textContent = 'İndiriliyor…';
-      fetch(yedek).then(function (r) { if (!r.ok) throw new Error('Bağlantının süresi dolmuş olabilir (' + r.status + ')'); return r.blob(); })
-        .then(function (b) {
-          var d = new Date(), name = 'ztm-yedek-' + d.toISOString().slice(0, 10) + '.json';
-          var a = document.createElement('a');
-          a.href = URL.createObjectURL(b); a.download = name;
-          document.body.appendChild(a); a.click();
-          $('dl-msg').textContent = '✓ ' + name + ' indirildi.';
-        }).catch(function (e) { $('dl-msg').textContent = e.message; });
+      Promise.all(yedekParts.map(function (u) {
+        return fetch(u).then(function (r) {
+          if (!r.ok) throw new Error('Bağlantının süresi dolmuş olabilir (' + r.status + '). TV\'de yeniden "Yedek al" de.');
+          return r.arrayBuffer();
+        });
+      })).then(function (bufs) {
+        var total = 0, off = 0;
+        bufs.forEach(function (b) { total += b.byteLength; });
+        var all = new Uint8Array(total);
+        bufs.forEach(function (b) { all.set(new Uint8Array(b), off); off += b.byteLength; });
+        if (params.get('gz') === '1') all = fflate.gunzipSync(all);
+        var d = new Date(), name = 'ztm-yedek-' + d.toISOString().slice(0, 10) + '.json';
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([all], { type: 'application/json' })); a.download = name;
+        document.body.appendChild(a); a.click();
+        $('dl-msg').textContent = '✓ ' + name + ' indirildi.';
+      }).catch(function (e) { $('dl-msg').textContent = e.message; });
     };
   }
+
   if (q) $('code').value = fmt(cleanCode(q));
   $('code').addEventListener('input', function () {
     var c = cleanCode(this.value); this.value = fmt(c);
@@ -151,16 +163,40 @@
     }).then(function (r) { if (!r.ok) throw new Error('Gönderilemedi (' + r.status + ')'); return r.json(); });
   }
 
-  // Dosyayı ayrı bir konuya ek olarak yükler, indirme adresini döndürür
-  function uploadFile(code, file) {
-    return fetch(NTFY + topic(code) + '-f', {
-      method: 'PUT', body: file, headers: { 'Filename': 'liste.m3u' }
-    }).then(function (r) {
-      if (!r.ok) throw new Error(r.status === 413 ? 'Dosya çok büyük' : 'Dosya yüklenemedi (' + r.status + ')');
-      return r.json();
-    }).then(function (j) {
-      if (!j.attachment || !j.attachment.url) throw new Error('Dosya yüklenemedi');
-      return j.attachment.url;
+  // Dosyayı sıkıştırıp (gzip) ~1.9 MB'lık parçalar hâlinde yükler.
+  // Ücretsiz aktarma servisi dosya başına ~2 MB kabul ediyor; TV parçaları birleştirip açıyor.
+  var PART = 1900000;
+  function uploadFile(code, file, onStep) {
+    return readBytes(file).then(function (bytes) {
+      var gz = fflate.gzipSync(bytes, { level: 9 });
+      var parts = [];
+      for (var i = 0; i < gz.length; i += PART) parts.push(gz.subarray(i, Math.min(i + PART, gz.length)));
+      if (parts.length > 25) throw new Error('Dosya çok büyük (sıkıştırınca bile ' + Math.round(gz.length / 1048576) + ' MB). Bunun yerine listenin adresini gönder.');
+      var urls = [];
+      return parts.reduce(function (chain, part, idx) {
+        return chain.then(function () {
+          if (onStep) onStep(idx + 1, parts.length);
+          return fetch(NTFY + topic(code) + '-f', {
+            method: 'PUT', body: part, headers: { 'Filename': 'liste.part' + (idx + 1) + '.gz' }
+          }).then(function (r) {
+            if (r.status === 413 || r.status === 429) throw new Error('Aktarma servisi şu an daha fazla dosya kabul etmiyor. Biraz sonra tekrar dene ya da listenin adresini gönder.');
+            if (!r.ok) throw new Error('Dosya yüklenemedi (' + r.status + ')');
+            return r.json();
+          }).then(function (j) {
+            if (!j.attachment || !j.attachment.url) throw new Error('Dosya yüklenemedi');
+            urls.push(j.attachment.url);
+          });
+        });
+      }, Promise.resolve()).then(function () { return { parts: urls, gz: true }; });
+    });
+  }
+
+  function readBytes(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(new Uint8Array(r.result)); };
+      r.onerror = function () { reject(new Error('Dosya okunamadı')); };
+      r.readAsArrayBuffer(file);
     });
   }
 
@@ -191,6 +227,7 @@
     if (code.length !== 8) return say('err', 'TV ekranındaki 8 karakterlik kodu yaz.');
     var btn = this, since = 'all';   // cevaplar rid ile ayırt ediliyor
     var rid = Math.random().toString(36).slice(2, 10);
+    function step(i, n) { say('wait', n > 1 ? 'Dosya yükleniyor… (' + i + '/' + n + ' parça)' : 'Dosya yükleniyor…'); }
     var job;
     if (pane === 'm3u') {
       var url = $('m3u-url').value.trim();
@@ -204,16 +241,16 @@
       var bf = $('b-file').files[0];
       if (!bf) return say('err', 'Önce yedek dosyasını seç.');
       say('wait', 'Yedek yükleniyor…');
-      job = uploadFile(code, bf).then(function (fileUrl) {
-        return publish(code, { v: 1, rid: rid, t: 'backup', url: fileUrl });
+      job = uploadFile(code, bf, step).then(function (up) {
+        return publish(code, { v: 1, rid: rid, t: 'backup', parts: up.parts, gz: up.gz });
       });
     } else {
       var f = $('f-file').files[0];
       if (!f) return say('err', 'Önce bir dosya seç.');
-      if (f.size > 10 * 1024 * 1024) return say('err', 'Dosya 10 MB\'tan büyük. Bunun yerine listenin adresini gönder.');
-      say('wait', 'Dosya yükleniyor…');
-      job = uploadFile(code, f).then(function (fileUrl) {
-        return publish(code, { v: 1, rid: rid, t: 'file', url: fileUrl, name: $('f-name').value.trim() || f.name.replace(/\.[^.]+$/, '') });
+      if (f.size > 80 * 1024 * 1024) return say('err', 'Dosya 80 MB\'tan büyük. Bunun yerine listenin adresini gönder.');
+      say('wait', 'Dosya sıkıştırılıyor…');
+      job = uploadFile(code, f, step).then(function (up) {
+        return publish(code, { v: 1, rid: rid, t: 'file', parts: up.parts, gz: up.gz, name: $('f-name').value.trim() || f.name.replace(/\.[^.]+$/, '') });
       });
     }
     btn.disabled = true;
