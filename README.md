@@ -1,4 +1,4 @@
-# ztm-logolar
+# ztmhub
 
 ZTM IPTV uygulamasi icin kanal logo kutuphanesi.
 
