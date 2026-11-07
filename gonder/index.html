@@ -157,7 +157,7 @@
   $('send').onclick = function () {
     var code = cleanCode($('code').value);
     if (code.length !== 8) return say('err', 'TV ekranındaki 8 karakterlik kodu yaz.');
-    var btn = this, since = Math.floor(Date.now() / 1000) - 2;
+    var btn = this, since = 'all';   // cevaplar rid ile ayırt ediliyor
     var rid = Math.random().toString(36).slice(2, 10);
     var job;
     if (pane === 'm3u') {
